@@ -519,24 +519,27 @@ def scrape_inverter():
     return True
 
 def reset_connection():
+    local_log = logging.getLogger('reset')
     # work around issue with Sungrow SG5KD where once in a while it stops responding to modbus comms
-    logging.info("[reset] trying to reset_connection")
+    local_log.info("trying to reset_connection")
     timeout_seconds=5
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.settimeout(timeout_seconds)
     result = sock.connect_ex((config.inverter_ip, config.inverter_port))
     if result == 0:
-        logging.info("[reset] connection succeeded")
+        local_log.info("connection succeeded")
         time.sleep(5)
     else:
-        logging.info("[reset] connection failed")
-    logging.info("[reset] closing socket and sleeping one scan interval")
+        local_log.info("connection failed")
+    local_log.info("closing socket and sleeping one scan interval")
     sock.close()
     time.sleep(config.scan_interval)
-    logging.info("[reset] finished reset_connection")
+    local_log.info("finished reset_connection")
 
 failcount=0
-reset_connection()
+cumulativefailcount=0
+if args.sungrow_reset:
+    reset_connection()
 
 while True:
     # Scrape the inverter
@@ -554,7 +557,12 @@ while True:
         
         if args.sungrow_reset:
             failcount = failcount + 1
-            
+            cumulativefailcount = cumulativefailcount + 1
+
+            if cumulativefailcount > 50:
+                logging.error("[reset] too many failures, quitting")
+                quit()
+
             if failcount > 10:
                 logging.info("[reset] fail count reached 10")
                 reset_connection()
