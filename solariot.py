@@ -41,6 +41,7 @@ import json
 import time
 import sys
 import re
+import socket
 
 
 MIN_SIGNED = -2147483648
@@ -64,6 +65,11 @@ parser.add_argument(
     "--one-shot",
     action="store_true",
     help="Run solariot just once then exit, useful for cron based execution",
+)
+parser.add_argument(
+    "--sungrow-reset",
+    action="store_true",
+    help="After comms fail with the inverter, do a dummy connect to try to reset the inverter's modbus connection",
 )
 
 args = parser.parse_args()
@@ -134,6 +140,9 @@ if "sungrow-" in config.model:
 else:
     logging.info("Creating ModbusTcpClient")
     client = ModbusTcpClient(**client_payload)
+
+if args.sungrow_reset:
+    logging.info("[reset] sungrow_reset enabled")
 
 logging.info("Connecting")
 client.connect()
@@ -659,9 +668,39 @@ def scrape_inverter():
     return True
 
 
+def reset_connection():
+    local_log = logging.getLogger("reset")
+    # work around issue with Sungrow SG5KD where once in a while it stops responding to modbus comms
+    local_log.info("trying to reset_connection")
+    timeout_seconds = 5
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(timeout_seconds)
+    try:
+        result = sock.connect_ex((config.inverter_ip, config.inverter_port))
+        if result == 0:
+            local_log.info("connection succeeded")
+            time.sleep(5)
+        else:
+            local_log.info("connection failed")
+    finally:
+        local_log.info("closing socket and sleeping one scan interval")
+        sock.close()
+    time.sleep(config.scan_interval)
+    local_log.info("finished reset_connection")
+
+
+failcount = 0
+cumulativefailcount = 0
+if args.sungrow_reset:
+    reset_connection()
+
 while True:
     # Scrape the inverter
     success = scrape_inverter()
+
+    if success:
+        failcount = 0
+        cumulativefailcount = 0
 
     if not success:
         # reset counters otherwise prometheus will keep on reporting whatever was pushed last
@@ -669,6 +708,20 @@ while True:
             prom_client.Clear_status()
         logging.warning("Failed to scrape inverter, sleeping until next scan")
         time.sleep(config.scan_interval)
+
+        if args.sungrow_reset:
+            failcount += 1
+            cumulativefailcount += 1
+
+            if cumulativefailcount > 50:
+                logging.error("[reset] too many failures, quitting")
+                sys.exit(1)
+
+            if failcount >= 10:
+                logging.info("[reset] fail count reached 10")
+                reset_connection()
+                failcount = 0
+
         continue
 
     # Optionally publish the metrics if enabled
@@ -697,7 +750,10 @@ while True:
         t.start()
 
     if hasattr(config, "json_file"):
-        t = Thread(target=save_json, args=(inverter, config.append_log))
+        t = Thread(
+            target=save_json,
+            args=(inverter, getattr(config, "append_log", False)),
+        )
         t.start()
 
     if args.one_shot:
