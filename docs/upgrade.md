@@ -240,10 +240,11 @@ Once you endorse this plan, work will proceed in clear, testable phases:
 - [x] Fixed `scrape_inverter()` to check `client.connect()` and always close the socket via `try ... finally: client.close()`.
 - [x] Added actual exception/error logging in `load_registers()` and `load_sma_register()`, and fixed bare `return` / `{type}` bugs.
 
-### Phase 3 — `paho-mqtt` 2.x Hardening & Thread Safety (Goal 2)
-- Keep `CallbackAPIVersion.VERSION2` and add v2 `on_connect`/`on_disconnect` logging callbacks.
-- Start the background network loop (`loop_start()`) once at startup and remove per-scan `reconnect()`.
-- Pass `inverter.copy()` snapshots to publisher threads (MQTT, PVOutput, JSON file), add bounded `wait_for_publish(timeout=5)` with exception handling, and join threads / disconnect cleanly on `--one-shot` and `SIGINT`/`SIGTERM`.
+### Phase 3 — `paho-mqtt` 2.x Hardening & Thread Safety (Complete)
+- [x] Kept `CallbackAPIVersion.VERSION2` with explicit keyword arguments and added v2 `on_mqtt_connect` / `on_mqtt_disconnect` logging callbacks + `reconnect_delay_set(min_delay=1, max_delay=60)`.
+- [x] Started `loop_start()` once at startup (falling back to `connect_async()` if broker is unreachable at boot), removed per-scan `reconnect()`, and removed the no-op `.replace('"', '"')`.
+- [x] Added `mqtt_connected` event + bounded `wait_for_publish(timeout=5)` with exception handling in `publish_mqtt()`, plus exception handling in `publish_pvoutput()` and `with open(...)` in `save_json()`.
+- [x] Passed `inverter.copy()` snapshots to all publisher threads, joined publisher threads on exit/`--one-shot`, and added `SIGINT`/`SIGTERM` signal handlers for clean shutdown (`mqtt_client.disconnect()`, `mqtt_client.loop_stop()`, `client.close()`).
 
 ### Phase 4 — Ubuntu 24.04 / Python 3.12 `requirements.txt` & Tests (Goal 1)
 - Lazy-import optional backends (`influxdb`, `prometheus_client`, `requests`/`urllib3`, `paho.mqtt.client`).

@@ -22,7 +22,7 @@
 
 from influxdb import InfluxDBClient
 from importlib import import_module
-from threading import Thread
+from threading import Event, Thread
 
 from prometheus_client import start_http_server, Gauge
 
@@ -34,6 +34,7 @@ import argparse
 import logging
 import logging.config
 import json
+import signal
 import struct
 import time
 import sys
@@ -166,10 +167,32 @@ else:
 client.close()
 
 # Configure MQTT
+mqtt_connected = Event()
 if hasattr(config, "mqtt_server"):
+    def on_mqtt_connect(client_obj, userdata, flags, reason_code, properties):
+        if getattr(reason_code, "is_failure", False):
+            mqtt_connected.clear()
+            logging.error("MQTT connection failed: %s", reason_code)
+        else:
+            mqtt_connected.set()
+            logging.info("MQTT connected: %s", reason_code)
+
+    def on_mqtt_disconnect(
+        client_obj, userdata, disconnect_flags, reason_code, properties
+    ):
+        mqtt_connected.clear()
+        if getattr(reason_code, "is_failure", False):
+            logging.warning("MQTT disconnected unexpectedly: %s", reason_code)
+        else:
+            logging.info("MQTT disconnected: %s", reason_code)
+
     mqtt_client = mqtt.Client(
-        mqtt.CallbackAPIVersion.VERSION2, getattr(config, "mqtt_client_name", "pv_data")
+        callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
+        client_id=getattr(config, "mqtt_client_name", "pv_data"),
     )
+    mqtt_client.on_connect = on_mqtt_connect
+    mqtt_client.on_disconnect = on_mqtt_disconnect
+    mqtt_client.reconnect_delay_set(min_delay=1, max_delay=60)
 
     if hasattr(config, "mqtt_username") and hasattr(config, "mqtt_password"):
         mqtt_client.username_pw_set(config.mqtt_username, config.mqtt_password)
@@ -177,7 +200,15 @@ if hasattr(config, "mqtt_server"):
     if config.mqtt_port == 8883:
         mqtt_client.tls_set()
 
-    mqtt_client.connect(config.mqtt_server, port=config.mqtt_port)
+    try:
+        mqtt_client.connect(config.mqtt_server, port=config.mqtt_port)
+    except OSError as err:
+        logging.warning(
+            "Initial MQTT connection failed (%s); will retry in background", err
+        )
+        mqtt_client.connect_async(config.mqtt_server, port=config.mqtt_port)
+
+    mqtt_client.loop_start()
     logging.info("Configured MQTT Client")
 else:
     mqtt_client = None
@@ -586,26 +617,32 @@ def publish_influx(metrics):
     return target
 
 
-def publish_mqtt(inverter):
-    # After a while you'll need to reconnect, so just reconnect before each publish
-    mqtt_client.reconnect()
+def publish_mqtt(snapshot):
+    try:
+        if not mqtt_connected.wait(timeout=5) and not mqtt_client.is_connected():
+            logging.warning("MQTT client is not connected; skipping publish")
+            return None
 
-    result = mqtt_client.publish(
-        config.mqtt_topic, json.dumps(inverter).replace('"', '"')
-    )
-    result.wait_for_publish()
+        result = mqtt_client.publish(config.mqtt_topic, json.dumps(snapshot))
+        result.wait_for_publish(timeout=5)
 
-    if result.rc != mqtt.MQTT_ERR_SUCCESS:
-        # See https://github.com/eclipse/paho.mqtt.python/blob/master/src/paho/mqtt/client.py#L149 for error code mapping
-        logging.error(f"Failed to publish to MQTT with error code: {result.rc}")
-    else:
-        logging.info("Published to MQTT")
+        if result.rc != mqtt.MQTT_ERR_SUCCESS:
+            logging.error(f"Failed to publish to MQTT with error code: {result.rc}")
+        else:
+            logging.info("Published to MQTT")
 
-    return result
+        return result
+    except (RuntimeError, ValueError, OSError) as err:
+        logging.error("Error publishing to MQTT: %s", err)
+        return None
 
 
-def publish_pvoutput(inverter):
-    result = pvoutput_client.publish_status(inverter)
+def publish_pvoutput(snapshot):
+    try:
+        result = pvoutput_client.publish_status(snapshot)
+    except Exception as err:
+        logging.error("Error publishing to PVOutput: %s", err)
+        return None
 
     if result == "skipped":
         logging.info("Skipping PVOutput to stay under the rate limit")
@@ -614,7 +651,7 @@ def publish_pvoutput(inverter):
     return result
 
 
-def save_json(inverter, append_log):
+def save_json(snapshot, append_log):
     try:
         # Default to one line per file.
         # If the config.append_log value is true, then open the file in append mode.
@@ -624,9 +661,8 @@ def save_json(inverter, append_log):
         if append_log is True:
             file_mode = "a"
             suffix = "\n"
-        f = open(config.json_file, file_mode)
-        f.write(json.dumps(inverter) + suffix)
-        f.close()
+        with open(config.json_file, file_mode) as f:
+            f.write(json.dumps(snapshot) + suffix)
     except Exception as err:
         logging.error("Error writing telemetry to file: %s" % err)
         return
@@ -717,76 +753,109 @@ def reset_connection():
     local_log.info("finished reset_connection")
 
 
+shutdown_event = Event()
+
+
+def _handle_shutdown(signum, frame):
+    logging.info("Received signal %s; shutting down", signum)
+    shutdown_event.set()
+
+
+signal.signal(signal.SIGINT, _handle_shutdown)
+if hasattr(signal, "SIGTERM"):
+    signal.signal(signal.SIGTERM, _handle_shutdown)
+
 failcount = 0
 cumulativefailcount = 0
 if args.sungrow_reset:
     reset_connection()
 
-while True:
-    # Scrape the inverter
-    success = scrape_inverter()
+threads = []
+try:
+    while not shutdown_event.is_set():
+        # Scrape the inverter
+        success = scrape_inverter()
 
-    if success:
-        failcount = 0
-        cumulativefailcount = 0
+        if success:
+            failcount = 0
+            cumulativefailcount = 0
 
-    if not success:
-        # reset counters otherwise prometheus will keep on reporting whatever was pushed last
+        if not success:
+            # reset counters otherwise prometheus will keep on reporting whatever was pushed last
+            if prom_client is not None:
+                prom_client.Clear_status()
+            logging.warning("Failed to scrape inverter, sleeping until next scan")
+            shutdown_event.wait(config.scan_interval)
+
+            if args.sungrow_reset:
+                failcount += 1
+                cumulativefailcount += 1
+
+                if cumulativefailcount > 50:
+                    logging.error("[reset] too many failures, quitting")
+                    sys.exit(1)
+
+                if failcount >= 10:
+                    logging.info("[reset] fail count reached 10")
+                    reset_connection()
+                    failcount = 0
+
+            continue
+
+        # Take an immutable snapshot so publisher threads never race with the next scrape
+        snapshot = inverter.copy()
+        threads = []
+
+        # Optionally publish the metrics if enabled
+        if mqtt_client is not None:
+            t = Thread(target=publish_mqtt, args=(snapshot,))
+            t.start()
+            threads.append(t)
+
         if prom_client is not None:
-            prom_client.Clear_status()
-        logging.warning("Failed to scrape inverter, sleeping until next scan")
-        time.sleep(config.scan_interval)
+            t = Thread(target=publish_prometheus, args=(snapshot,))
+            t.start()
+            threads.append(t)
 
-        if args.sungrow_reset:
-            failcount += 1
-            cumulativefailcount += 1
+        if flux_client is not None:
+            metrics = {
+                "measurement": "Sungrow",
+                "tags": {
+                    "location": "Gabba",
+                },
+                "fields": snapshot,
+            }
 
-            if cumulativefailcount > 50:
-                logging.error("[reset] too many failures, quitting")
-                sys.exit(1)
+            t = Thread(target=publish_influx, args=(metrics,))
+            t.start()
+            threads.append(t)
 
-            if failcount >= 10:
-                logging.info("[reset] fail count reached 10")
-                reset_connection()
-                failcount = 0
+        if pvoutput_client is not None:
+            t = Thread(target=publish_pvoutput, args=(snapshot,))
+            t.start()
+            threads.append(t)
 
-        continue
+        if hasattr(config, "json_file"):
+            t = Thread(
+                target=save_json,
+                args=(snapshot, getattr(config, "append_log", False)),
+            )
+            t.start()
+            threads.append(t)
 
-    # Optionally publish the metrics if enabled
+        if args.one_shot:
+            logging.info("Exiting due to --one-shot")
+            break
+
+        # Sleep until the next scan (wakes immediately on SIGINT/SIGTERM)
+        shutdown_event.wait(config.scan_interval)
+finally:
+    for t in threads:
+        t.join(timeout=10)
     if mqtt_client is not None:
-        t = Thread(target=publish_mqtt, args=(inverter,))
-        t.start()
-
-    if prom_client is not None:
-        t = Thread(target=publish_prometheus, args=(inverter,))
-        t.start()
-
-    if flux_client is not None:
-        metrics = {
-            "measurement": "Sungrow",
-            "tags": {
-                "location": "Gabba",
-            },
-            "fields": inverter,
-        }
-
-        t = Thread(target=publish_influx, args=(metrics,))
-        t.start()
-
-    if pvoutput_client is not None:
-        t = Thread(target=publish_pvoutput, args=(inverter,))
-        t.start()
-
-    if hasattr(config, "json_file"):
-        t = Thread(
-            target=save_json,
-            args=(inverter, getattr(config, "append_log", False)),
-        )
-        t.start()
-
-    if args.one_shot:
-        logging.info("Exiting due to --one-shot")
-        break
-
-    # Sleep until the next scan
-    time.sleep(config.scan_interval)
+        try:
+            mqtt_client.disconnect()
+        except Exception:
+            pass
+        mqtt_client.loop_stop()
+    client.close()
