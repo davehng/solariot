@@ -261,6 +261,10 @@ Once you endorse this plan, work will proceed in clear, testable phases:
 - Push rewritten `solariot-dave` `master` with `git push --force-with-lease` (you'll handle remote pushes if/when ready) and update the LXC checkout with `git fetch && git reset --hard origin/master`.
 - Create a fresh `venv` (`python3 -m venv .venv`), run `pip install -r requirements.txt`, verify with `--one-shot -v` against the live SG5K-D and MQTT broker, and diff the MQTT JSON payload and `telemetry.json` output against current production before cutting over (and optionally switching to a `systemd` service).
 
+### Phase 6 — Attribution & Licensing Cleanup
+- Update `LICENSE` to add `Copyright (c) 2026 David Hng` on the line immediately after `Copyright (c) 2017 Dennis Mellican` (and check header notice in `solariot.py` if desired).
+- Add an attribution comment at the top of `sungrow_tcp_client.py` crediting Roberto Panerai Velloso and the original Sungrow Modbus wrapper repository (`https://github.com/rpvelloso/Sungrow-Modbus`).
+
 ---
 
 ## 8. Recorded Decisions & Caveats
