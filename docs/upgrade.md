@@ -64,7 +64,7 @@ Even at `HEAD` (`beb63a7`), upstream `solariot`:
 
 ### 3.1 Environment Changes in Ubuntu 24.04 LTS
 - **System Python:** Python **3.12** (`/usr/bin/python3`).
-- **PEP 668 Enforcement:** Ubuntu 24.04 ships `/usr/lib/python3.12/EXTERNALLY-MANAGED`, which blocks `pip install` into system or `~/.local` site-packages by default. Running inside a dedicated virtual environment (e.g., `/home/dhng/source/solariot/.venv`) is now mandatory rather than optional.
+- **PEP 668 Enforcement:** Ubuntu 24.04 ships `/usr/lib/python3.12/EXTERNALLY-MANAGED`, which blocks `pip install` into system or `~/.local` site-packages by default. Running inside a dedicated virtual environment (e.g., `<solariot-dir>/.venv`) is now mandatory rather than optional.
 - **Python 3.12 Removals:** `distutils` was removed from the standard library (PEP 632), and newly created `venv`s no longer pre-install `setuptools` / `pkg_resources`. Legacy packages that import `distutils` or `pkg_resources` at runtime will fail unless replaced or avoided.
 
 ### 3.2 Clarifying "Without Legacy Pinning" vs Environment Isolation
@@ -96,7 +96,7 @@ There are two distinct concerns in your notes:
 - Replace `quit()` (`solariot-dave/solariot.py:564`) with `sys.exit(1)` so `systemd` (`Restart=on-failure`) detects abnormal termination and restarts cleanly.
 - Remove the broken/no-op `.replace('"', '\"')` (upstream: `.replace('"', '"')`) in `publish_mqtt()` and pass `json.dumps(inverter)` directly.
 - If Docker is used in the future, bump `Dockerfile` from EOL `python:3.9-alpine` to `python:3.12-slim` (or `python:3.12-alpine`).
-- Provide a clean `systemd` unit example pointing at `/home/dhng/source/solariot/.venv/bin/python` for running in your Ubuntu 24.04 LXC.
+- Provide a clean `systemd` unit example pointing at `<solariot-dir>/.venv/bin/python` for running in an Ubuntu 24.04 LXC.
 
 ---
 
@@ -276,7 +276,7 @@ Once you endorse this plan, work will proceed in clear, testable phases:
 | # | Decision | Status / Notes & Caveats |
 |---|---|---|
 | 1 | **Rebase/reset `solariot-dave` `master` onto upstream `solariot` (`beb63a7`) and re-apply custom features directly on `master`** | **Good — 1 git caveat:** Because `solariot-dave` tracks `origin` (`github.com/davehng/solariot.git`), resetting `master` rewrites history vs `origin/master`. We will create a local backup tag (`backup-2021-master`) first; when pushing to GitHub later you'll need `git push --force-with-lease`, and on your LXC you'll sync once via `git fetch && git reset --hard origin/master` (normal `git pull` works again afterward). |
-| 2 | **Option B1 — self-contained Sungrow AES-128-ECB Modbus TCP client in-repo (`socket` + `pycryptodomex`), plus `pymodbus` 3.x for standard/SMA** | **Good — 1 prerequisite:** Cleanest long-term choice; immune to future `pymodbus` internal rewrites, and `pycryptodomex` ships Python 3.12 wheels. Before coding it, please share `/home/dhng/.local/lib/python3.10/site-packages/SungrowModbusTcpClient/SungrowModbusTcpClient.py` so we match the exact framing/padding your SG5K-D accepts. |
+| 2 | **Option B1 — self-contained Sungrow AES-128-ECB Modbus TCP client in-repo (`socket` + `pycryptodomex`), plus `pymodbus` 3.x for standard/SMA** | **Good — 1 prerequisite:** Cleanest long-term choice; immune to future `pymodbus` internal rewrites, and `pycryptodomex` ships Python 3.12 wheels. Before coding it, review the installed `<site-packages>/SungrowModbusTcpClient/SungrowModbusTcpClient.py` reference implementation so we match the exact framing/padding the SG5K-D accepts. |
 | 3 | **Active outputs: MQTT, PVOutput, JSON file (not using Prometheus, InfluxDB, or dweepy)** | **Good — 2 catches covered:** (a) Upstream `solariot.py:700` has a bug passing `config.append_log` without a default, which would break your existing `json_file` config—we will fix it with `getattr(config, "append_log", False)`. (b) `requests` (used by PVOutput) was previously only installed transitively via `influxdb`/`dweepy`—we will declare it explicitly in `requirements.txt`. |
 | 4 | **Reset `cumulativefailcount` to `0` after any successful scrape** | **Good — no issues:** `cumulativefailcount` becomes consecutive failures across reset cycles (e.g., resets at 10, 20, 30, 40, 50, then exits cleanly via `sys.exit(1)` if 5 consecutive reset attempts fail), instead of exiting after 50 scattered blips over weeks/months. |
 | 5 | **Keep `requirements.txt` (matching upstream convention)** | **Good — 1 nuance:** Keep `requirements.txt` focused on the core Python 3.12–clean stack (`paho-mqtt>=2.0,<3`, `pycryptodomex>=3.20`, `requests>=2.31`, `pymodbus>=3.7,<4`) and comment out optional/legacy packages (`influxdb`, `prometheus-client`, `SungrowModbusWebClient`) so `pip install -r requirements.txt` doesn't pull EOL `influxdb` v1 or unused packages on Ubuntu 24.04. |
