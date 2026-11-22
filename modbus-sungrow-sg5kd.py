@@ -59,9 +59,9 @@ holding_register = {
   "5003": "hour",
   "5004": "minute",
   "5005": "second",
-  "5006": "start_stop",
-  "5007": "power_limit",
-  "5010": "export_limit",
+  "5006": "start_stop",       # 0xCF = start, 0xCE = stop
+  "5007": "power_limit",      # inverter is power limiting. 0xAA = enabled, 0x55 = disabled
+  "5010": "export_limit",     # inverter is export limiting. 0xAA = enabled, 0x55 = disabled
 
 }
 
@@ -90,7 +90,7 @@ pvoutput = {
   "Energy Generation": "daily_power_yield",
   "Power Generation": "total_active_power",
   "Energy Consumption": "daily_energy_consumption_pv",
-  #"Power Consumption": "power_meter",    # power meter is recording overall house consumption (including imported power), not just the consumption of PV so don't supply this value otherwise pvoutput.org gets confused
+  "Power Consumption": "pv_consumption",  # calculated in solariot.py (total_pv_power - exported_power) rather than power_meter (which includes grid imports)
   "Temperature": "internal_temp",
   "Voltage": "grid_voltage"
 }

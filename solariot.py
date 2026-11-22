@@ -62,6 +62,11 @@ parser.add_argument(
     action="store_true",
     help="After comms fail with the inverter, do a dummy connect to try to reset the inverter's modbus connection",
 )
+parser.add_argument(
+    "--exit-on-error",
+    action="store_true",
+    help="Exit this app if an error occurs instead of retrying",
+)
 
 args = parser.parse_args()
 
@@ -151,6 +156,9 @@ modbus_id_kwarg = get_modbus_id_kwarg(client)
 
 if args.sungrow_reset:
     logging.info("[reset] sungrow_reset enabled")
+
+if args.exit_on_error:
+    logging.info("exit_on_error enabled")
 
 logging.info("Connecting")
 if client.connect():
@@ -287,6 +295,7 @@ if hasattr(config, "pvoutput_api"):
             self.rate_limit = rate_limit
 
             self.latest_run = None
+            self.last_power = None
 
         @property
         def headers(self):
@@ -326,9 +335,16 @@ if hasattr(config, "pvoutput_api"):
                 time_diff = (now - self.latest_run).total_seconds()
 
                 if time_diff < (3600 / self.rate_limit):
+                    logging.info("Skipping PVOutput to stay under the rate limit")
                     return "skipped"
 
             parameters = {"d": now.strftime("%Y%m%d"), "t": now.strftime("%H:%M")}
+
+            if parameters["t"] == "00:00":
+                # Skip midnight so slight clock skew between server and inverter
+                # cannot send yesterday's cumulative generation as today's first reading
+                logging.info("Skipping midnight update to pvoutput.org")
+                return "skipped"
 
             # Standard Values
 
@@ -344,7 +360,23 @@ if hasattr(config, "pvoutput_api"):
                 ]
 
             if self.metric_mappings.get("Power Generation") in metrics:
-                parameters["v2"] = metrics[self.metric_mappings.get("Power Generation")]
+                value = metrics[self.metric_mappings.get("Power Generation")]
+                parameters["v2"] = value
+
+                if value == 0 and self.last_power is None:
+                    logging.info(
+                        "Skipping update to pvoutput.org as no power generated"
+                    )
+                    return "skipped"
+
+                if value == 0 and self.last_power == 0:
+                    logging.debug(
+                        "Power value was zero and previous power value was zero, "
+                        "will stop updating pvoutput until power is nonzero"
+                    )
+                    self.last_power = None
+                else:
+                    self.last_power = value
 
             if (
                 self.metric_mappings.get("Energy Consumption") in metrics
@@ -648,7 +680,7 @@ def publish_pvoutput(snapshot):
         return None
 
     if result == "skipped":
-        logging.info("Skipping PVOutput to stay under the rate limit")
+        logging.info("Skipping PVOutput")
     else:
         logging.info("Published to PVOutput")
     return result
@@ -701,6 +733,20 @@ def scrape_inverter():
                         inverter["export_power"] = export_power
                 except Exception:
                     pass
+
+            # Calculate PV consumption for pvoutput.org v4
+            if config.model == "sungrow-sg5kd":
+                try:
+                    export_power = inverter["export_power"]
+                    exported_power = -export_power if export_power < 0 else 0
+                    total_pv_power = inverter["total_pv_power"]
+                    pv_consumption = total_pv_power - exported_power
+                    inverter["pv_consumption"] = pv_consumption
+                    logging.debug("Calculated pv_consumption=%s", pv_consumption)
+                except KeyError as err:
+                    logging.warning(
+                        "Unable to calculate pv_consumption; missing key %s", err
+                    )
 
             try:
                 inverter["timestamp"] = "%s/%s/%s %s:%02d:%02d" % (
@@ -787,6 +833,11 @@ try:
             # reset counters otherwise prometheus will keep on reporting whatever was pushed last
             if prom_client is not None:
                 prom_client.Clear_status()
+
+            if args.exit_on_error:
+                logging.error("Exiting due to error")
+                sys.exit(1)
+
             logging.warning("Failed to scrape inverter, sleeping until next scan")
             shutdown_event.wait(config.scan_interval)
 
@@ -809,42 +860,49 @@ try:
         snapshot = inverter.copy()
         threads = []
 
-        # Optionally publish the metrics if enabled
-        if mqtt_client is not None:
-            t = Thread(target=publish_mqtt, args=(snapshot,))
-            t.start()
-            threads.append(t)
+        # Skip publishing if consumption meter returns invalid sentinel values
+        if (
+            snapshot.get("export_power") == 65535
+            and snapshot.get("power_meter") == 65535
+        ):
+            logging.warning("Invalid consumption data (65535), skipping update")
+        else:
+            # Optionally publish the metrics if enabled
+            if mqtt_client is not None:
+                t = Thread(target=publish_mqtt, args=(snapshot,))
+                t.start()
+                threads.append(t)
 
-        if prom_client is not None:
-            t = Thread(target=publish_prometheus, args=(snapshot,))
-            t.start()
-            threads.append(t)
+            if prom_client is not None:
+                t = Thread(target=publish_prometheus, args=(snapshot,))
+                t.start()
+                threads.append(t)
 
-        if flux_client is not None:
-            metrics = {
-                "measurement": "Sungrow",
-                "tags": {
-                    "location": "Gabba",
-                },
-                "fields": snapshot,
-            }
+            if flux_client is not None:
+                metrics = {
+                    "measurement": "Sungrow",
+                    "tags": {
+                        "location": "Gabba",
+                    },
+                    "fields": snapshot,
+                }
 
-            t = Thread(target=publish_influx, args=(metrics,))
-            t.start()
-            threads.append(t)
+                t = Thread(target=publish_influx, args=(metrics,))
+                t.start()
+                threads.append(t)
 
-        if pvoutput_client is not None:
-            t = Thread(target=publish_pvoutput, args=(snapshot,))
-            t.start()
-            threads.append(t)
+            if pvoutput_client is not None:
+                t = Thread(target=publish_pvoutput, args=(snapshot,))
+                t.start()
+                threads.append(t)
 
-        if hasattr(config, "json_file"):
-            t = Thread(
-                target=save_json,
-                args=(snapshot, getattr(config, "append_log", False)),
-            )
-            t.start()
-            threads.append(t)
+            if hasattr(config, "json_file"):
+                t = Thread(
+                    target=save_json,
+                    args=(snapshot, getattr(config, "append_log", False)),
+                )
+                t.start()
+                threads.append(t)
 
         if args.one_shot:
             logging.info("Exiting due to --one-shot")

@@ -1,5 +1,6 @@
 """Unit tests for SolarIoT (Sungrow AES client, pymodbus 3.x, paho-mqtt 2.x, SG5KD)."""
 
+import datetime
 import json
 import logging
 import os
@@ -361,6 +362,7 @@ class TestSolarIoTEndToEnd(unittest.TestCase):
                     regs[2] = 123      # 5003 daily_power_yield_0.01 -> 12300.0
                     regs[3] = 450      # 5004 total_power_yield_100 -> 4.5
                     regs[7] = 355      # 5008 internal_temp_10 -> 35.5
+                    regs[16] = 2500    # 5017 total_pv_power -> 2500
                     regs[18] = 2401    # 5019 grid_voltage_10 -> 240.1
                     regs[30] = 2500    # 5031 total_active_power -> 2500
                     regs[34] = 995     # 5035 power_factor_1000 -> 0.995
@@ -427,7 +429,15 @@ class TestSolarIoTEndToEnd(unittest.TestCase):
                 "requests": fake_requests,
                 "urllib3": fake_urllib3,
             }
-            self._run_solariot(cfg, ["solariot.py", "-c", "test_cfg", "--one-shot"], extra)
+            class FixedMidday(datetime.datetime):
+                @classmethod
+                def now(cls, tz=None):
+                    return cls(2026, 11, 22, 10, 15, 0)
+
+            with patch("datetime.datetime", FixedMidday):
+                self._run_solariot(
+                    cfg, ["solariot.py", "-c", "test_cfg", "--one-shot"], extra
+                )
 
             # Verify lazy-import guarantee: unused optional modules were never required
             self.assertEqual(len(sg_instances), 1)
@@ -456,14 +466,15 @@ class TestSolarIoTEndToEnd(unittest.TestCase):
             self.assertEqual(payload["total_energy_consumption_pv"], 123.4)
             self.assertEqual(payload["daily_running_time"], 420)
             self.assertEqual(payload["export_limit"], 5000)
+            self.assertEqual(payload["pv_consumption"], 1451)
             self.assertEqual(payload["timestamp"], "22/11/2026 9:45:05")
 
-            # Verify PVOutput payload (omits v4 per Dave's SG5KD map)
+            # Verify PVOutput payload (includes calculated pv_consumption as v4)
             self.assertEqual(len(pv_posts), 1)
             self.assertEqual(pv_posts[0]["v1"], 12300.0)
             self.assertEqual(pv_posts[0]["v2"], 2500)
             self.assertEqual(pv_posts[0]["v3"], 5000.0)
-            self.assertNotIn("v4", pv_posts[0])
+            self.assertEqual(pv_posts[0]["v4"], 1451)
             self.assertEqual(pv_posts[0]["v5"], 35.5)
             self.assertEqual(pv_posts[0]["v6"], 240.1)
 
@@ -471,6 +482,7 @@ class TestSolarIoTEndToEnd(unittest.TestCase):
             with open(json_path) as f:
                 saved_json = json.load(f)
             self.assertEqual(saved_json["export_power"], -1049)
+            self.assertEqual(saved_json["pv_consumption"], 1451)
 
     def test_json_file_append_log_mode(self):
         sg_mod, _ = self._make_sg5kd_sungrow_module()
@@ -661,6 +673,222 @@ class TestSolarIoTEndToEnd(unittest.TestCase):
         # resetting cumulativefailcount to 0 so all 51 subsequent failures ran before exit!
         self.assertEqual(len(reset_connects), 6)
         self.assertEqual(call_idx["n"], 9 + 1 + 51)
+
+    def test_exit_on_error_flag(self):
+        sg_mod, sg_instances = self._make_sg5kd_sungrow_module(fail_on_read=True)
+        cfg = types.ModuleType("test_cfg")
+        cfg.inverter_ip = "192.168.1.23"
+        cfg.inverter_port = 502
+        cfg.slave = 1
+        cfg.model = "sungrow-sg5kd"
+        cfg.timeout = 1
+        cfg.scan_interval = 10
+
+        with self.assertRaises(SystemExit) as cm:
+            self._run_solariot(
+                cfg,
+                ["solariot.py", "-c", "test_cfg", "--exit-on-error"],
+                {"sungrow_tcp_client": sg_mod},
+            )
+
+        self.assertEqual(cm.exception.code, 1)
+        # Startup connect + 1 failed scrape -> immediate exit without retrying
+        self.assertEqual(sg_instances[0].connect_calls, 2)
+
+    def test_invalid_consumption_data_skips_publish(self):
+        mqtt_mods, published, _ = self._make_fake_mqtt()
+
+        class InvalidMeterClient:
+            def __init__(self, **kwargs):
+                pass
+
+            def connect(self):
+                return True
+
+            def close(self):
+                pass
+
+            def read_input_registers(self, address, count=1, device_id=1):
+                regs = [0] * count
+                if address == 5000:
+                    regs[82] = 65535  # 5083 export_power = 65535 (indicator=0 -> stays 65535)
+                    regs[83] = 0      # 5084 export_power_indicator
+                    regs[90] = 65535  # 5091 power_meter = 65535
+                return types.SimpleNamespace(isError=lambda: False, registers=regs)
+
+            def read_holding_registers(self, address, count=1, device_id=1):
+                return types.SimpleNamespace(isError=lambda: False, registers=[0] * count)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            json_path = os.path.join(tmpdir, "telemetry.json")
+            cfg = types.ModuleType("test_cfg")
+            cfg.inverter_ip = "192.168.1.23"
+            cfg.inverter_port = 502
+            cfg.slave = 1
+            cfg.model = "sungrow-sg5kd"
+            cfg.timeout = 3
+            cfg.scan_interval = 1
+            cfg.mqtt_server = "192.168.1.10"
+            cfg.mqtt_port = 1883
+            cfg.mqtt_topic = "inverter/stats"
+            cfg.json_file = json_path
+
+            extra = {
+                **mqtt_mods,
+                "sungrow_tcp_client": types.SimpleNamespace(
+                    SungrowModbusTcpClient=InvalidMeterClient
+                ),
+            }
+            class FixedMidday(datetime.datetime):
+                @classmethod
+                def now(cls, tz=None):
+                    return cls(2026, 11, 22, 10, 15, 0)
+
+            with patch("datetime.datetime", FixedMidday):
+                self._run_solariot(
+                    cfg, ["solariot.py", "-c", "test_cfg", "--one-shot"], extra
+                )
+
+            self.assertEqual(published, [])
+            self.assertFalse(os.path.exists(json_path))
+
+    def test_pv_consumption_when_importing_vs_exporting(self):
+        class ImportClient:
+            def __init__(self, **kwargs):
+                pass
+
+            def connect(self):
+                return True
+
+            def close(self):
+                pass
+
+            def read_input_registers(self, address, count=1, device_id=1):
+                regs = [0] * count
+                if address == 5000:
+                    regs[16] = 600   # 5017 total_pv_power = 600W
+                    regs[82] = 400   # 5083 export_power = +400W (importing)
+                    regs[83] = 0     # 5084 indicator = 0 (positive)
+                    regs[90] = 1000  # 5091 power_meter = 1000W
+                return types.SimpleNamespace(isError=lambda: False, registers=regs)
+
+            def read_holding_registers(self, address, count=1, device_id=1):
+                return types.SimpleNamespace(isError=lambda: False, registers=[0] * count)
+
+        cfg = types.ModuleType("test_cfg")
+        cfg.inverter_ip = "192.168.1.23"
+        cfg.inverter_port = 502
+        cfg.slave = 1
+        cfg.model = "sungrow-sg5kd"
+        cfg.timeout = 3
+        cfg.scan_interval = 1
+
+        ns = self._run_solariot(
+            cfg,
+            ["solariot.py", "-c", "test_cfg", "--one-shot"],
+            {
+                "sungrow_tcp_client": types.SimpleNamespace(
+                    SungrowModbusTcpClient=ImportClient
+                )
+            },
+        )
+        # When importing (export_power > 0), exported_power = 0 so all 600W PV is consumed
+        self.assertEqual(ns["inverter"]["export_power"], 400)
+        self.assertEqual(ns["inverter"]["pv_consumption"], 600)
+
+    def test_pvoutput_midnight_and_zero_power_skip_logic(self):
+        sg_mod, _ = self._make_sg5kd_sungrow_module()
+        pv_posts = []
+        fake_requests = types.SimpleNamespace(
+            codes=types.SimpleNamespace(ok=200),
+            post=lambda url, headers, params: (
+                pv_posts.append(params),
+                types.SimpleNamespace(status_code=200, text="OK"),
+            )[1],
+        )
+        fake_urllib3 = types.SimpleNamespace(disable_warnings=lambda: None)
+
+        cfg = types.ModuleType("test_cfg")
+        cfg.inverter_ip = "192.168.1.23"
+        cfg.inverter_port = 502
+        cfg.slave = 1
+        cfg.model = "sungrow-sg5kd"
+        cfg.timeout = 3
+        cfg.scan_interval = 1
+        cfg.pvoutput_api = "api-key"
+        cfg.pvoutput_sid = "12345"
+        cfg.pvoutput_rate_limit = 60
+
+        class ControllableDateTime(datetime.datetime):
+            current = datetime.datetime(2026, 11, 22, 10, 0, 0)
+
+            @classmethod
+            def now(cls, tz=None):
+                return cls.current
+
+        with patch("datetime.datetime", ControllableDateTime):
+            ns = self._run_solariot(
+                cfg,
+                ["solariot.py", "-c", "test_cfg", "--one-shot"],
+                {
+                    "sungrow_tcp_client": sg_mod,
+                    "requests": fake_requests,
+                    "urllib3": fake_urllib3,
+                },
+            )
+            pub = ns["pvoutput_client"]
+            # Reset publisher state for deterministic sequence test
+            pv_posts.clear()
+            pub.latest_run = None
+            pub.last_power = None
+
+            base = {
+                "daily_power_yield": 1000.0,
+                "daily_energy_consumption_pv": 500.0,
+                "pv_consumption": 0,
+                "internal_temp": 30.0,
+                "grid_voltage": 240.0,
+            }
+
+            # 1) Midnight 00:00 -> skipped even with non-zero power
+            ControllableDateTime.current = datetime.datetime(2026, 11, 22, 0, 0, 10)
+            self.assertEqual(pub.publish_status({**base, "total_active_power": 100}), "skipped")
+            self.assertEqual(len(pv_posts), 0)
+
+            # 2) Initial 0W power (last_power is None) -> skipped
+            ControllableDateTime.current = datetime.datetime(2026, 11, 22, 5, 0, 0)
+            self.assertEqual(pub.publish_status({**base, "total_active_power": 0}), "skipped")
+            self.assertEqual(len(pv_posts), 0)
+
+            # 3) Sunrise non-zero power -> posted, last_power=1200
+            ControllableDateTime.current = datetime.datetime(2026, 11, 22, 7, 0, 0)
+            pub.publish_status({**base, "total_active_power": 1200, "pv_consumption": 800})
+            self.assertEqual(len(pv_posts), 1)
+            self.assertEqual(pv_posts[-1]["v2"], 1200)
+            self.assertEqual(pv_posts[-1]["v4"], 800)
+
+            # 4) Sunset 1st zero reading -> posted, last_power=0
+            ControllableDateTime.current = datetime.datetime(2026, 11, 22, 18, 5, 0)
+            pub.publish_status({**base, "total_active_power": 0})
+            self.assertEqual(len(pv_posts), 2)
+            self.assertEqual(pub.last_power, 0)
+
+            # 5) Sunset 2nd zero reading -> posted, resets last_power=None
+            ControllableDateTime.current = datetime.datetime(2026, 11, 22, 18, 10, 0)
+            pub.publish_status({**base, "total_active_power": 0})
+            self.assertEqual(len(pv_posts), 3)
+            self.assertIsNone(pub.last_power)
+
+            # 6) Night 3rd zero reading -> skipped overnight
+            ControllableDateTime.current = datetime.datetime(2026, 11, 22, 18, 15, 0)
+            self.assertEqual(pub.publish_status({**base, "total_active_power": 0}), "skipped")
+            self.assertEqual(len(pv_posts), 3)
+
+            # 7) Next morning non-zero power -> resumes posting!
+            ControllableDateTime.current = datetime.datetime(2026, 11, 23, 6, 30, 0)
+            pub.publish_status({**base, "total_active_power": 300, "pv_consumption": 300})
+            self.assertEqual(len(pv_posts), 4)
+            self.assertEqual(pv_posts[-1]["v2"], 300)
 
 
 if __name__ == "__main__":
