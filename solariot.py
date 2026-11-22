@@ -20,11 +20,6 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 # THE SOFTWARE.
 
-from SungrowModbusTcpClient import SungrowModbusTcpClient
-from SungrowModbusWebClient import SungrowModbusWebClient
-from pymodbus.payload import BinaryPayloadDecoder
-from pymodbus.client.sync import ModbusTcpClient
-from pymodbus.constants import Endian
 from influxdb import InfluxDBClient
 from importlib import import_module
 from threading import Thread
@@ -33,11 +28,13 @@ from prometheus_client import start_http_server, Gauge
 
 import paho.mqtt.client as mqtt
 import datetime
+import inspect
 import requests
 import argparse
 import logging
 import logging.config
 import json
+import struct
 import time
 import sys
 import re
@@ -121,33 +118,52 @@ except ModuleNotFoundError:
     logging.error(f"Unable to locate {modmap_file}.py")
     sys.exit(1)
 
-# This will try the Sungrow client otherwise will default to the standard library.
+# This will try the Sungrow client otherwise will default to pymodbus 3.x.
 client_payload = {
     "host": config.inverter_ip,
     "timeout": config.timeout,
-    "RetryOnEmpty": True,
     "retries": 3,
     "port": config.inverter_port,
 }
 
 if "sungrow-" in config.model:
     if config.inverter_port == 8082:
+        from SungrowModbusWebClient import SungrowModbusWebClient
+
         logging.info("Creating SungrowModbusWebClient")
         client = SungrowModbusWebClient.SungrowModbusWebClient(**client_payload)
     else:
+        from sungrow_tcp_client import SungrowModbusTcpClient
+
         logging.info("Creating SungrowModbusTcpClient")
-        client = SungrowModbusTcpClient.SungrowModbusTcpClient(**client_payload)
+        client = SungrowModbusTcpClient(**client_payload)
 else:
+    from pymodbus.client import ModbusTcpClient
+
     logging.info("Creating ModbusTcpClient")
     client = ModbusTcpClient(**client_payload)
+
+
+def get_modbus_id_kwarg(modbus_client):
+    """Detect whether the Modbus client expects device_id=, slave=, or unit=."""
+    params = inspect.signature(modbus_client.read_input_registers).parameters
+    for kw in ("device_id", "slave", "unit"):
+        if kw in params:
+            return kw
+    return "device_id"
+
+
+modbus_id_kwarg = get_modbus_id_kwarg(client)
 
 if args.sungrow_reset:
     logging.info("[reset] sungrow_reset enabled")
 
 logging.info("Connecting")
-client.connect()
+if client.connect():
+    logging.info("Connected")
+else:
+    logging.warning("Initial connection to inverter failed; will retry in scan loop")
 client.close()
-logging.info("Connected")
 
 # Configure MQTT
 if hasattr(config, "mqtt_server"):
@@ -385,38 +401,45 @@ bus = json.loads(modmap.scan)
 
 
 def load_registers(register_type, start, count=100):
+    id_kwargs = {modbus_id_kwarg: config.slave}
     try:
         if register_type == "read":
             rr = client.read_input_registers(
                 int(start),
                 count=count,
-                unit=config.slave,
+                **id_kwargs,
             )
         elif register_type == "holding":
             rr = client.read_holding_registers(
                 int(start),
                 count=count,
-                unit=config.slave,
+                **id_kwargs,
             )
         else:
-            raise RuntimeError(f"Unsupported register type: {type}")
+            raise RuntimeError(f"Unsupported register type: {register_type}")
     except Exception as err:
-        logging.warning("No data. Try increasing the timeout or scan interval.")
+        logging.warning(
+            "Modbus read failed (%s %s..+%s): %s. Try increasing the timeout or scan interval.",
+            register_type,
+            start,
+            count,
+            err,
+        )
         return False
 
     if rr.isError():
-        logging.warning("Modbus connection failed")
+        logging.warning("Modbus connection/read failed: %s", rr)
         return False
 
     if not hasattr(rr, "registers"):
         logging.warning("No registers returned")
-        return
+        return False
 
     if len(rr.registers) != count:
         logging.warning(
             f"Mismatched number of registers read {len(rr.registers)} != {count}"
         )
-        return
+        return False
 
     overflow_regex = re.compile(r"(?P<register_name>[a-zA-Z0-9_\.]+)_overflow$")
     divide_regex = re.compile(
@@ -482,60 +505,62 @@ def load_registers(register_type, start, count=100):
 # Function for polling data from the target and triggering writing to log file if set
 
 
+def decode_sma_registers(registers, datatype):
+    """Decode big-endian Modbus registers without deprecated BinaryPayloadDecoder."""
+    raw = struct.pack(f">{len(registers)}H", *registers)
+    if datatype == "S32":
+        return struct.unpack(">i", raw[:4])[0]
+    if datatype == "U32":
+        return struct.unpack(">I", raw[:4])[0]
+    if datatype == "U64":
+        return struct.unpack(">Q", raw[:8])[0]
+    if datatype == "STR16":
+        return raw[:16].rstrip(b"\x00").decode("utf-8", errors="replace")
+    if datatype == "STR32":
+        return raw[:32].rstrip(b"\x00").decode("utf-8", errors="replace")
+    if datatype == "S16":
+        return struct.unpack(">h", raw[:2])[0]
+    return struct.unpack(">H", raw[:2])[0]
+
+
 def load_sma_register(registers):
+    id_kwargs = {modbus_id_kwarg: config.slave}
     # Request each register from datasets, omit first row which contains only column headers
     for thisrow in registers:
         name = thisrow[0]
         startPos = thisrow[1]
-        type = thisrow[2]
-        format = thisrow[3]
+        datatype = thisrow[2]
+        fmt = thisrow[3]
 
         # If the connection is somehow not possible (e.g. target not responding)
-        # show a error message instead of excepting and stopping
+        # show an error message instead of excepting and stopping
         try:
             received = client.read_input_registers(
-                address=startPos, count=sma_moddatatype[type], unit=config.slave
+                startPos, count=sma_moddatatype[datatype], **id_kwargs
             )
-        except Exception:
+        except Exception as err:
             thisdate = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             logging.error(
-                f"{thisdate}: Connection not possible, check settings or connection"
+                f"{thisdate}: Connection not possible, check settings or connection ({err})"
             )
             return
 
-        message = BinaryPayloadDecoder.fromRegisters(
-            received.registers, endian=Endian.Big
-        )
+        if received.isError() or not hasattr(received, "registers"):
+            logging.error("Failed reading SMA register %s (%s): %s", name, startPos, received)
+            return
 
-        # Provide the correct result depending on the defined datatype
-        if type == "S32":
-            interpreted = message.decode_32bit_int()
-        elif type == "U32":
-            interpreted = message.decode_32bit_uint()
-        elif type == "U64":
-            interpreted = message.decode_64bit_uint()
-        elif type == "STR16":
-            interpreted = message.decode_string(16)
-        elif type == "STR32":
-            interpreted = message.decode_string(32)
-        elif type == "S16":
-            interpreted = message.decode_16bit_int()
-        elif type == "U16":
-            interpreted = message.decode_16bit_uint()
-        else:
-            # If no data type is defined do raw interpretation of the delivered data
-            interpreted = message.decode_16bit_uint()
+        interpreted = decode_sma_registers(received.registers, datatype)
 
         # Check for "None" data before doing anything else
         if (interpreted == MIN_SIGNED) or (interpreted == MAX_UNSIGNED):
             displaydata = None
         else:
             # Put the data with correct formatting into the data table
-            if format == "FIX3":
+            if fmt == "FIX3":
                 displaydata = float(interpreted) / 1000
-            elif format == "FIX2":
+            elif fmt == "FIX2":
                 displaydata = float(interpreted) / 100
-            elif format == "FIX1":
+            elif fmt == "FIX1":
                 displaydata = float(interpreted) / 10
             else:
                 displaydata = interpreted
@@ -614,44 +639,47 @@ def save_json(inverter, append_log):
 def scrape_inverter():
     """Connect to the inverter and scrape the metrics"""
     logging.debug("Begin scraping...")
-    client.connect()
+    if not client.connect():
+        logging.warning("Failed to connect to inverter")
+        return False
 
-    if "sungrow-" in config.model:
-        for i in bus["read"]:
-            if not load_registers("read", i["start"], int(i["range"])):
-                return False
+    try:
+        if "sungrow-" in config.model:
+            for i in bus["read"]:
+                if not load_registers("read", i["start"], int(i["range"])):
+                    return False
 
-        for i in bus["holding"]:
-            if not load_registers("holding", i["start"], int(i["range"])):
-                return False
+            for i in bus["holding"]:
+                if not load_registers("holding", i["start"], int(i["range"])):
+                    return False
 
-        # Sungrow inverter specifics:
-        # Work out if the grid power is being imported or exported
-        if config.model == "sungrow-sh5k":
+            # Sungrow inverter specifics:
+            # Work out if the grid power is being imported or exported
+            if config.model == "sungrow-sh5k":
+                try:
+                    if inverter["grid_import_or_export"] == 65535:
+                        export_power = (65535 - inverter["export_power"]) * -1
+                        inverter["export_power"] = export_power
+                except Exception:
+                    pass
+
             try:
-                if inverter["grid_import_or_export"] == 65535:
-                    export_power = (65535 - inverter["export_power"]) * -1
-                    inverter["export_power"] = export_power
+                inverter["timestamp"] = "%s/%s/%s %s:%02d:%02d" % (
+                    inverter["day"],
+                    inverter["month"],
+                    inverter["year"],
+                    inverter["hour"],
+                    inverter["minute"],
+                    inverter["second"],
+                )
             except Exception:
                 pass
-
-        try:
-            inverter["timestamp"] = "%s/%s/%s %s:%02d:%02d" % (
-                inverter["day"],
-                inverter["month"],
-                inverter["year"],
-                inverter["hour"],
-                inverter["minute"],
-                inverter["second"],
-            )
-        except Exception:
-            pass
-    elif "sma-" in config.model:
-        load_sma_register(modmap.sma_registers)
-    else:
-        raise RuntimeError(f"Unsupported inverter model detected: {config.model}")
-
-    client.close()
+        elif "sma-" in config.model:
+            load_sma_register(modmap.sma_registers)
+        else:
+            raise RuntimeError(f"Unsupported inverter model detected: {config.model}")
+    finally:
+        client.close()
 
     # Filter out the keys we want to log
     # keys_to_log = ['battery_level', 'battery_voltage', 'daily_export_energy', 'daily_charge_energy', 'daily_use_energy', 'grid_voltage_a', 'grid_voltage_b', 'grid_voltage_c']
