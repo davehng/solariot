@@ -9,7 +9,7 @@ After reviewing all Python code, git history, and dependencies across both `sola
 3. **Migrate to `pymodbus` 3.x (Pre-Flight Completed — AES Encryption Confirmed):** Live testing against your SG5K-D with `pymodbus 3.16.2` confirmed that your inverter requires **Sungrow AES-128-ECB encryption** (`_aes_ecb` active, plain `ModbusTcpClient` times out). We therefore recommend **Option B1**: a self-contained (~100-line) Sungrow AES-128-ECB Modbus TCP client in-repo (stdlib `socket` + `pycryptodomex`/`pycryptodome`) for Sungrow TCP, while upgrading standard/SMA Modbus support to `pymodbus` 3.x. This removes the unmaintained `SungrowModbusTcpClient` package and insulates your SG5K-D polling from future `pymodbus` internal API churn.
 4. **Target Ubuntu 24.04 LTS (Python 3.12) inside a dedicated `venv`** (or container) to comply with PEP 668, lazily import optional output backends (`influxdb`, `prometheus_client`, `SungrowModbusWebClient`) so you aren't forced to install legacy/unused packages, and eliminate legacy version pins (`pymodbus==2.4.0`, `paho-mqtt==1.6.1`).
 
-> **Status:** Phases 0–4 and Phase 6 are complete; ready for Phase 5 (Ubuntu 24.04 LXC deployment).
+> **Status:** Phases 0–4 and Phase 6 are complete; live hardware testing in Phase 5 succeeded and surfaced unpushed in-field production fixes to port in Phase 7 before final cutover.
 >
 > **Attribution:** This upgrade plan was developed with **Gemini 4 Neon** using **Antigravity**, and the Python code changes, tests, and documentation updates across Phases 1–4 and Phase 6 were implemented by Gemini 4 Neon in collaboration with David Hng.
 
@@ -268,6 +268,16 @@ Once you endorse this plan, work will proceed in clear, testable phases:
 - [x] Added attribution comment at the top of [sungrow_tcp_client.py](../sungrow_tcp_client.py) crediting Roberto Panerai Velloso (`https://github.com/rpvelloso/Sungrow-Modbus`) for the original Sungrow Modbus TCP wrapper.
 - [x] Added AI collaboration attribution (Gemini 4 Neon via Antigravity) in `docs/upgrade.md`.
 - [x] Added a fork summary section at the top of [README.md](../README.md) referencing the `backup-2021-master` tag, the rebase onto upstream, and [docs/upgrade.md](../docs/upgrade.md).
+
+### Phase 7 — Port In-Field Production Fixes (Pending)
+During live Phase 5 validation, comparing telemetry output against the existing production instance surfaced several unpushed in-field fixes made between late 2021 and 2024 that need to be ported into the upgraded codebase:
+- [ ] Port holding register documentation comments (`start_stop`, `power_limit`, `export_limit`) into `modbus-sungrow-sg5kd.py`.
+- [ ] Port `--exit-on-error` CLI flag to exit immediately (`sys.exit(1)`) on scrape failure instead of sleeping/retrying.
+- [ ] Port PVOutput midnight skip (`t == "00:00"`) so clock skew at midnight does not send the previous day's cumulative yield.
+- [ ] Port PVOutput overnight zero-power skip (`self.last_power`) and accurate skip-reason logging.
+- [ ] Port `sungrow-sg5kd` `pv_consumption` calculation (`total_pv_power - exported_power`, where `exported_power = -export_power` when exporting) and PVOutput `v4` (`Power Consumption`) mapping.
+- [ ] Port invalid consumption meter guard (`export_power == 65535 and power_meter == 65535`) using `.get()` and `logging.warning(...)` so invalid meter reads skip publishing.
+- [ ] Add unit tests covering each ported in-field fix.
 
 ---
 
