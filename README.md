@@ -2,9 +2,11 @@
 
 ## About This Fork
 
-This fork of [meltaxa/solariot](https://github.com/meltaxa/solariot) maintains customisations for a Sungrow SG5K-D inverter (expanded register map in `modbus-sungrow-sg5kd.py` and the `--sungrow-reset` connection recovery flag) and modernises the codebase for Ubuntu 24.04 LTS / Python 3.12, `paho-mqtt` 2.x, and `pymodbus` 3.x (including a self-contained Sungrow AES-128-ECB Modbus TCP client in `sungrow_tcp_client.py`).
+This fork of [meltaxa/solariot](https://github.com/meltaxa/solariot) maintains customisations for a Sungrow SG5K-D inverter and modernises the codebase for Ubuntu 22.04 / 24.04 LTS (Python 3.10–3.12), `paho-mqtt` 2.x, and `pymodbus` 3.x:
 
-The original 2021 fork changes are preserved at the `backup-2021-master` git tag and have been reworked onto a rebase of upstream `solariot` by David Hng and Gemini 4 Neon (using Antigravity) following the plan documented in [docs/upgrade.md](docs/upgrade.md).
+* **Sungrow SG5K-D & PVOutput enhancements:** Expanded register map in `modbus-sungrow-sg5kd.py`, calculated `pv_consumption` (exported to MQTT, JSON, and PVOutput `v4`), PVOutput midnight and overnight zero-power skip logic, invalid consumption meter (`65535`) filtering, and optional `--sungrow-reset` / `--exit-on-error` CLI flags.
+* **Modern dependencies & reliability:** Self-contained Sungrow AES-128-ECB Modbus TCP client in `sungrow_tcp_client.py` (no longer tied to `pymodbus` 2.x internals), `pymodbus` 3.x support for standard/SMA inverters, hardened `paho-mqtt` 2.x background loop with clean `SIGINT`/`SIGTERM` shutdown, lazy-imported optional backends, and a stdlib `unittest` suite (`tests/test_solariot.py`).
+* **Documentation & deployment:** The original 2021 fork changes are preserved at the `backup-2021-master` git tag and were reworked onto a rebase of upstream `solariot` by David Hng and Gemini 4 Neon (using Antigravity) following [docs/upgrade.md](docs/upgrade.md). See [docs/systemd-example.md](docs/systemd-example.md) for running SolarIoT in a `.venv` as a `systemd` service.
 
 ---
 
