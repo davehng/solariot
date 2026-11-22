@@ -9,7 +9,9 @@ After reviewing all Python code, git history, and dependencies across both `sola
 3. **Migrate to `pymodbus` 3.x (Pre-Flight Completed — AES Encryption Confirmed):** Live testing against your SG5K-D with `pymodbus 3.16.2` confirmed that your inverter requires **Sungrow AES-128-ECB encryption** (`_aes_ecb` active, plain `ModbusTcpClient` times out). We therefore recommend **Option B1**: a self-contained (~100-line) Sungrow AES-128-ECB Modbus TCP client in-repo (stdlib `socket` + `pycryptodomex`/`pycryptodome`) for Sungrow TCP, while upgrading standard/SMA Modbus support to `pymodbus` 3.x. This removes the unmaintained `SungrowModbusTcpClient` package and insulates your SG5K-D polling from future `pymodbus` internal API churn.
 4. **Target Ubuntu 24.04 LTS (Python 3.12) inside a dedicated `venv`** (or container) to comply with PEP 668, lazily import optional output backends (`influxdb`, `prometheus_client`, `SungrowModbusWebClient`) so you aren't forced to install legacy/unused packages, and eliminate legacy version pins (`pymodbus==2.4.0`, `paho-mqtt==1.6.1`).
 
-> **Status:** Plan decisions recorded in [Section 8](#8-recorded-decisions--caveats). No source files have been modified yet—ready to proceed once you provide `SungrowModbusTcpClient.py` (for Option B1 byte-framing accuracy) and give the final go-ahead.
+> **Status:** Phases 0–4 and Phase 6 are complete; ready for Phase 5 (Ubuntu 24.04 LXC deployment).
+>
+> **Attribution:** This upgrade plan was developed with **Gemini 4 Neon** using **Antigravity**, and the Python code changes, tests, and documentation updates across Phases 1–4 and Phase 6 were implemented by Gemini 4 Neon in collaboration with David Hng.
 
 ---
 
@@ -261,9 +263,11 @@ Once you endorse this plan, work will proceed in clear, testable phases:
 - Push rewritten `solariot-dave` `master` with `git push --force-with-lease` (you'll handle remote pushes if/when ready) and update the LXC checkout with `git fetch && git reset --hard origin/master`.
 - Create a fresh `venv` (`python3 -m venv .venv`), run `pip install -r requirements.txt`, verify with `--one-shot -v` against the live SG5K-D and MQTT broker, and diff the MQTT JSON payload and `telemetry.json` output against current production before cutting over (and optionally switching to a `systemd` service).
 
-### Phase 6 — Attribution & Licensing Cleanup
-- Update `LICENSE` to add `Copyright (c) 2026 David Hng` on the line immediately after `Copyright (c) 2017 Dennis Mellican` (and check header notice in `solariot.py` if desired).
-- Add an attribution comment at the top of `sungrow_tcp_client.py` crediting Roberto Panerai Velloso and the original Sungrow Modbus wrapper repository (`https://github.com/rpvelloso/Sungrow-Modbus`).
+### Phase 6 — Attribution & Licensing Cleanup (Complete)
+- [x] Updated [LICENSE](../LICENSE) to add `Copyright (c) 2026 David Hng` directly after `Copyright (c) 2017 Dennis Mellican`.
+- [x] Added attribution comment at the top of [sungrow_tcp_client.py](../sungrow_tcp_client.py) crediting Roberto Panerai Velloso (`https://github.com/rpvelloso/Sungrow-Modbus`) for the original Sungrow Modbus TCP wrapper.
+- [x] Added AI collaboration attribution (Gemini 4 Neon via Antigravity) in `docs/upgrade.md`.
+- [x] Added a fork summary section at the top of [README.md](../README.md) referencing the `backup-2021-master` tag, the rebase onto upstream, and [docs/upgrade.md](../docs/upgrade.md).
 
 ---
 

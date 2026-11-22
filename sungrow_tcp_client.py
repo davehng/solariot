@@ -1,3 +1,6 @@
+# Based on the original Sungrow Modbus TCP encryption wrapper by
+# Roberto Panerai Velloso (https://github.com/rpvelloso/Sungrow-Modbus).
+
 """Self-contained Sungrow encrypted Modbus TCP client (AES-128-ECB).
 
 Implements Sungrow's Modbus TCP AES-128-ECB framing and daily key exchange

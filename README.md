@@ -1,5 +1,13 @@
 # Solariot
 
+## About This Fork
+
+This fork of [meltaxa/solariot](https://github.com/meltaxa/solariot) maintains customisations for a Sungrow SG5K-D inverter (expanded register map in `modbus-sungrow-sg5kd.py` and the `--sungrow-reset` connection recovery flag) and modernises the codebase for Ubuntu 24.04 LTS / Python 3.12, `paho-mqtt` 2.x, and `pymodbus` 3.x (including a self-contained Sungrow AES-128-ECB Modbus TCP client in `sungrow_tcp_client.py`).
+
+The original 2021 fork changes are preserved at the `backup-2021-master` git tag and have been reworked onto a rebase of upstream `solariot` by David Hng and Gemini 4 Neon (using Antigravity) following the plan documented in [docs/upgrade.md](docs/upgrade.md).
+
+---
+
 Leverage your IoT enabled Solar PV Inverter to stream your solar energy usage
 data to a real time dashboard.
 
