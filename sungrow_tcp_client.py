@@ -94,6 +94,7 @@ class SungrowModbusTcpClient:
         if self._sock is None:
             raise ConnectionError("Socket is not connected")
         buf = bytearray()
+        chunks = 0
         while len(buf) < num_bytes:
             chunk = self._sock.recv(num_bytes - len(buf))
             if not chunk:
@@ -101,6 +102,9 @@ class SungrowModbusTcpClient:
                     f"Connection closed after {len(buf)}/{num_bytes} bytes"
                 )
             buf.extend(chunk)
+            chunks += 1
+        if chunks > 1:
+            logger.debug("Reassembled %d bytes across %d TCP chunks", num_bytes, chunks)
         return bytes(buf)
 
     def _setup_crypto(self, pub_key):
@@ -122,6 +126,11 @@ class SungrowModbusTcpClient:
         self._sock.sendall(GET_KEY)
         key_packet = self._recv_exact(25)
         pub_key = key_packet[9:]
+        logger.debug(
+            "Sungrow key exchange response prefix=%s pub_key_len=%d",
+            key_packet[:9].hex(),
+            len(pub_key),
+        )
         if (
             len(pub_key) == 16
             and pub_key != NO_CRYPTO1
@@ -140,6 +149,10 @@ class SungrowModbusTcpClient:
             return False
 
         if self._needs_key():
+            logger.debug(
+                "Negotiating Sungrow session key for %s (will reconnect afterward)",
+                self.host,
+            )
             try:
                 self._negotiate_key()
             except (OSError, ConnectionError) as err:
@@ -152,6 +165,12 @@ class SungrowModbusTcpClient:
             # TCP connection before encrypted Modbus requests are sent.
             if not self._open_socket():
                 return False
+        else:
+            logger.debug(
+                "Reusing cached Sungrow session key for %s (date=%s, single TCP connect)",
+                self.host,
+                self._key_date,
+            )
 
         return True
 
@@ -186,6 +205,16 @@ class SungrowModbusTcpClient:
 
         encrypted_packet = self._recv_exact(total_len)
         decrypted = self._aes_ecb.decrypt(encrypted_packet)
+        logger.debug(
+            "Sungrow encrypted frame: tx=%d req_hdr=%s resp_hdr=%s "
+            "(len=%d pad=%d) dec_prefix=%s",
+            tx_id,
+            crypto_header.hex(),
+            header.hex(),
+            packet_len,
+            resp_padding,
+            decrypted[:9].hex(),
+        )
         return struct.pack(">H", tx_id) + decrypted[2:packet_len]
 
     def _send_and_receive_plain(self, request):
