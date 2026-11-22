@@ -9,9 +9,9 @@ After reviewing all Python code, git history, and dependencies across both `sola
 3. **Migrate to `pymodbus` 3.x (Pre-Flight Completed — AES Encryption Confirmed):** Live testing against your SG5K-D with `pymodbus 3.16.2` confirmed that your inverter requires **Sungrow AES-128-ECB encryption** (`_aes_ecb` active, plain `ModbusTcpClient` times out). We therefore recommend **Option B1**: a self-contained (~100-line) Sungrow AES-128-ECB Modbus TCP client in-repo (stdlib `socket` + `pycryptodomex`/`pycryptodome`) for Sungrow TCP, while upgrading standard/SMA Modbus support to `pymodbus` 3.x. This removes the unmaintained `SungrowModbusTcpClient` package and insulates your SG5K-D polling from future `pymodbus` internal API churn.
 4. **Target Ubuntu 24.04 LTS (Python 3.12) inside a dedicated `venv`** (or container) to comply with PEP 668, lazily import optional output backends (`influxdb`, `prometheus_client`, `SungrowModbusWebClient`) so you aren't forced to install legacy/unused packages, and eliminate legacy version pins (`pymodbus==2.4.0`, `paho-mqtt==1.6.1`).
 
-> **Status:** Phases 0–4, Phase 6, and Phase 7 are complete (13/13 unit tests passing); ready for final Phase 5 cutover.
+> **Status:** All code, test, attribution, and live SG5K-D hardware validation phases (Phases 0–4, 6, 7, and live Phase 5 verification) are complete with 13/13 unit tests passing and 100% telemetry key parity (`Missing keys: []`, `Added keys: []`). Ready for production cutover and future Ubuntu 24.04 LTS upgrade (recreate `.venv` after OS upgrade).
 >
-> **Attribution:** This upgrade plan was developed with **Gemini 4 Neon** using **Antigravity**, and the Python code changes, tests, and documentation updates across Phases 1–4 and Phase 6 were implemented by Gemini 4 Neon in collaboration with David Hng.
+> **Attribution:** This upgrade plan was developed with **Gemini 4 Neon** using **Antigravity**, and the Python code changes, tests, and documentation updates across Phases 1–4, 6, and 7 were implemented by Gemini 4 Neon in collaboration with David Hng.
 
 ---
 
@@ -259,9 +259,11 @@ Once you endorse this plan, work will proceed in clear, testable phases:
   - `paho-mqtt` 2.x publish/shutdown lifecycle, PVOutput payload, and `save_json` (with and without `append_log`).
   - `--sungrow-reset` failure/reset thresholds and reset of `cumulativefailcount` on success.
 
-### Phase 5 — Deployment to Ubuntu 24.04 LXC
-- Push rewritten `solariot-dave` `master` with `git push --force-with-lease` (you'll handle remote pushes if/when ready) and update the LXC checkout with `git fetch && git reset --hard origin/master`.
-- Create a fresh `venv` (`python3 -m venv .venv`), run `pip install -r requirements.txt`, verify with `--one-shot -v` against the live SG5K-D and MQTT broker, and diff the MQTT JSON payload and `telemetry.json` output against current production before cutting over (and optionally switching to a `systemd` service).
+### Phase 5 — Deployment to Ubuntu LXC (Live Verification Complete)
+- [x] Pushed rebased `master` and verified fresh clone with `.venv` and modern dependencies (`paho-mqtt` 2.x, `pycryptodomex` 3.x, `pymodbus` 3.x, `requests` 2.x) — 13/13 unit tests passing on LXC.
+- [x] Verified live multi-poll and `--one-shot -vv` runs against the SG5K-D: AES-128-ECB handshake, single-connect cached-key reuse, MQTT 2.x publishing, PVOutput `v1`–`v6` (HTTP 200), `telemetry.json` output, thread-join on exit, and clean MQTT disconnection.
+- [x] Verified 100% telemetry JSON schema parity (`Missing keys: []`, `Added keys: []`).
+- [ ] Switch production startup/service to `.venv/bin/python` (and recreate `.venv` after upgrading the LXC from Ubuntu 22.04 to Ubuntu 24.04 LTS).
 
 ### Phase 6 — Attribution & Licensing Cleanup (Complete)
 - [x] Updated [LICENSE](../LICENSE) to add `Copyright (c) 2026 David Hng` directly after `Copyright (c) 2017 Dennis Mellican`.
