@@ -246,15 +246,15 @@ Once you endorse this plan, work will proceed in clear, testable phases:
 - [x] Added `mqtt_connected` event + bounded `wait_for_publish(timeout=5)` with exception handling in `publish_mqtt()`, plus exception handling in `publish_pvoutput()` and `with open(...)` in `save_json()`.
 - [x] Passed `inverter.copy()` snapshots to all publisher threads, joined publisher threads on exit/`--one-shot`, and added `SIGINT`/`SIGTERM` signal handlers for clean shutdown (`mqtt_client.disconnect()`, `mqtt_client.loop_stop()`, `client.close()`).
 
-### Phase 4 — Ubuntu 24.04 / Python 3.12 `requirements.txt` & Tests (Goal 1)
-- Lazy-import optional backends (`influxdb`, `prometheus_client`, `requests`/`urllib3`, `paho.mqtt.client`).
-- Update `requirements.txt` to modern major-bounded dependencies for your active stack (`paho-mqtt>=2.0,<3`, `pycryptodomex>=3.20`, `requests>=2.31`, `pymodbus>=3.7,<4`), with unused/legacy backends (`prometheus-client`, `influxdb`, `SungrowModbusWebClient`) commented out or documented in `requirements-optional.txt` so `pip install -r requirements.txt` stays clean on Python 3.12.
-- Update `Dockerfile` to Python 3.12.
-- Add lightweight unit tests (mocked Sungrow AES TCP server/socket + mocked MQTT/PVOutput/JSON outputs) verifying:
-  - Sungrow AES key exchange, encryption/decryption, and FC03/FC04 framing.
-  - `modbus-sungrow-sg5kd.py` register decoding (including `_overflow`/`_indicator` and `_0.01`/`_10`/`_100`/`_1000` scaling) produces identical JSON output to `solariot-dave`.
-  - `pymodbus` 3.x SMA/standard client compatibility and socket close-on-error handling.
-  - `paho-mqtt` 2.x publish path, PVOutput request payload, and `save_json` (with and without `append_log`).
+### Phase 4 — Ubuntu 24.04 / Python 3.12 `requirements.txt` & Tests (Complete)
+- [x] Lazy-imported optional backends (`influxdb`, `prometheus_client`, `requests`/`urllib3`, `paho.mqtt.client`) and replaced deprecated `requests.packages.urllib3.disable_warnings()` with `urllib3.disable_warnings()`.
+- [x] Updated [requirements.txt](../requirements.txt) to modern major-bounded dependencies (`paho-mqtt>=2.0.0,<3`, `pycryptodomex>=3.20.0`, `requests>=2.31.0`, `pymodbus>=3.7.0,<4`) with optional/legacy backends commented out.
+- [x] Updated [Dockerfile](../Dockerfile) to `python:3.12-slim` with non-root `solariot` user.
+- [x] Added stdlib `unittest` suite in [tests/test_solariot.py](../tests/test_solariot.py) (9/9 passing):
+  - Sungrow AES key exchange, encryption/decryption, fragmented TCP reads, exception responses, stale-key re-negotiation, and unencrypted fallback.
+  - `modbus-sungrow-sg5kd.py` register decoding (`_overflow`/`_indicator`, `_0.01`/`_10`/`_100`/`_1000`, holding registers, `timestamp`) and lazy-import isolation.
+  - `pymodbus` 3.x `device_id=`/`slave=`/`unit=` detection, SMA `struct` decoding, and socket close-on-error handling.
+  - `paho-mqtt` 2.x publish/shutdown lifecycle, PVOutput payload, and `save_json` (with and without `append_log`).
   - `--sungrow-reset` failure/reset thresholds and reset of `cumulativefailcount` on success.
 
 ### Phase 5 — Deployment to Ubuntu 24.04 LXC

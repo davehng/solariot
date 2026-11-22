@@ -20,16 +20,11 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 # THE SOFTWARE.
 
-from influxdb import InfluxDBClient
 from importlib import import_module
 from threading import Event, Thread
 
-from prometheus_client import start_http_server, Gauge
-
-import paho.mqtt.client as mqtt
 import datetime
 import inspect
-import requests
 import argparse
 import logging
 import logging.config
@@ -44,8 +39,6 @@ import socket
 
 MIN_SIGNED = -2147483648
 MAX_UNSIGNED = 4294967295
-
-requests.packages.urllib3.disable_warnings()
 
 # Load in the config module
 parser = argparse.ArgumentParser()
@@ -167,8 +160,11 @@ else:
 client.close()
 
 # Configure MQTT
+mqtt = None
 mqtt_connected = Event()
 if hasattr(config, "mqtt_server"):
+    import paho.mqtt.client as mqtt
+
     def on_mqtt_connect(client_obj, userdata, flags, reason_code, properties):
         if getattr(reason_code, "is_failure", False):
             mqtt_connected.clear()
@@ -215,6 +211,7 @@ else:
     logging.info("No MQTT configuration detected")
 
 if hasattr(config, "prometheus"):
+    from prometheus_client import start_http_server, Gauge
 
     class PrometheusPublisher(object):
         def __init__(self, port):
@@ -250,6 +247,8 @@ else:
 
 # Configure InfluxDB
 if hasattr(config, "influxdb_ip"):
+    from influxdb import InfluxDBClient
+
     flux_client = InfluxDBClient(
         config.influxdb_ip,
         config.influxdb_port,
@@ -267,6 +266,10 @@ else:
 
 # Configure PVOutput
 if hasattr(config, "pvoutput_api"):
+    import requests
+    import urllib3
+
+    urllib3.disable_warnings()
 
     class PVOutputPublisher(object):
         def __init__(
